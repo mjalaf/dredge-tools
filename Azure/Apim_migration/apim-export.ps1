@@ -94,13 +94,23 @@ $apisUrl = "$base/apis?api-version=$ApiVersion"
 $apis = @( Get-Paged -Url $apisUrl )
 Write-Host ">> Found $($apis.Count) API(s)."
 
+
+$__exportStart = Get-Date
+$i = 0
+$total = $apis.Count
 foreach ($api in $apis) {
-  $apiId = $api.name
+  $i++
+  $currentName = $api.name
+  Write-Verbose ("[API {0}/{1}] {2}" -f $i, $total, $currentName)
+  $pct = if ($total -gt 0) { [int](100 * $i / $total) } else { 0 }
+  Write-Progress -Activity "Exporting APIs" -Status ("{0}/{1}: {2}" -f $i, $total, $currentName) -PercentComplete $pct
+$apiId = $api.name
   $apiNameSafe = Safe-Name $apiId
   $apiFolder = Join-Path $apisFolder $apiNameSafe
   Ensure-Folder $apiFolder
 
   Write-Host "  - Exporting API '$apiId'..."
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
   # 1.a OpenAPI via `az apim api export` (reliable across tenants)
   # Formats: OpenApiJson | OpenApi | Wadl | Wsdl | etc.
@@ -242,7 +252,6 @@ if (Test-Path $mapFile) {
     }
   }
 }
-
-
-
+  $totalElapsed = (Get-Date) - $__exportStart
+Write-Verbose ("Total elapsed: {0:g}" -f $totalElapsed)
 Write-Host ">> Done. Output under: $OutFolder"
