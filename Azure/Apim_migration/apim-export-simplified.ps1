@@ -121,8 +121,8 @@ $backendsData = Get-Content "$OutFolder\global\backends.json" | ConvertFrom-Json
 Write-Host "   ✓ $($backendsData.value.Count) backends exportados" -ForegroundColor Green
 
 # 6. APIs
-Write-Host "6. Exportando APIs..." -ForegroundColor Yellow
-$apisUri = "$baseUri/apis" + "?api-version=$ApiVersion"
+Write-Host "6. Exportando APIs (solo revisión actual)..." -ForegroundColor Yellow
+$apisUri = "$baseUri/apis" + "?api-version=$ApiVersion" + "&" + '$filter=isCurrent eq true'
 $apisResult = az rest --uri $apisUri | ConvertFrom-Json
 
 # Filtrar APIs si se especificaron
