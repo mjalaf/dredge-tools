@@ -25,12 +25,15 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)] [string]$SubscriptionId,
+  [Parameter(Mandatory=$false)] [switch]$TraceAz,
+  [Parameter(Mandatory=$false)] [string]$TraceDir,
   [Parameter(Mandatory=$true)] [string]$ResourceGroup,
   [Parameter(Mandatory=$true)] [string]$ApimName,
   [Parameter(Mandatory=$true)] [string]$OutFolder,
   [string]$ApiVersion = "2023-03-01-preview"
 )
 
+$TraceDir = if ($TraceDir) { $TraceDir } else { $OutFolder }
 # ---- Helpers ---------------------------------------------------------------
 
 function Ensure-Folder {
@@ -51,26 +54,89 @@ function Safe-Name {
   return ($Name -replace '[^\w\.\-]+','_')
 }
 
+
 function Invoke-AzRestJson {
-  param([string]$Url)
-  $raw = az rest --method get --url $Url 2>$null
+  param([string]$Url, [string]$Activity = $null)
+  # Instrumented az rest call with heartbeat progress and optional --debug log
+  $Activity = if ($Activity) { $Activity } else { "ARM GET" }
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+  $args = @("rest","--method","get","--url",$Url,"--output","json")
+  if ($TraceAz) { $args += "--debug" }
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = "az"
+  $psi.Arguments = ($args -join " ")
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  [void]$p.Start()
+
+  $stderr = New-Object System.Text.StringBuilder
+  $stdout = New-Object System.Text.StringBuilder
+
+  # Pump output asynchronously to avoid deadlocks, and emit heartbeat progress
+  while (-not $p.HasExited) {
+    Start-Sleep -Milliseconds 500
+    try {
+      $errChunk = $p.StandardError.ReadExisting()
+      if ($errChunk) { $null = $stderr.Append($errChunk) }
+      $outChunk = $p.StandardOutput.ReadExisting()
+      if ($outChunk) { $null = $stdout.Append($outChunk) }
+    } catch {}
+
+    $elapsed = [int]$sw.Elapsed.TotalSeconds
+    Write-Progress -Id 73 -Activity $Activity -Status ("Waiting Azure... {0}s" -f $elapsed) -PercentComplete -1
+  }
+  Write-Progress -Id 73 -Activity $Activity -Completed
+
+  # Flush any remaining streams
+  try {
+    $errTail = $p.StandardError.ReadToEnd()
+    if ($errTail) { $null = $stderr.Append($errTail) }
+    $outTail = $p.StandardOutput.ReadToEnd()
+    if ($outTail) { $null = $stdout.Append($outTail) }
+  } catch {}
+
+  $p.WaitForExit()
+
+  # Persist debug if requested
+  if ($TraceAz) {
+    Ensure-Folder $TraceDir
+    $safe = ("azrest_" + (Safe-Name $Activity) + ".log")
+    $logPath = Join-Path $TraceDir $safe
+    $stderr.ToString() | Out-File -FilePath $logPath -Encoding UTF8
+    Write-Verbose ("az --debug captured to {0}" -f $logPath)
+  }
+
+  $raw = $stdout.ToString()
   if (-not $raw) { return $null }
   try { return ($raw | ConvertFrom-Json) } catch { return $null }
 }
+
 
 function Get-Paged {
   <#
     Calls an ARM list endpoint and yields .value[] across pages.
   #>
-  param([string]$Url)
+  param([string]$Url, [string]$Activity = $null)
   $next = $Url
+  $pageNum = 0
   while ($true) {
-    $page = Invoke-AzRestJson -Url $next
+    $pageNum++
+    $act = if ($Activity) { "$Activity (page $pageNum)" } else { "ARM list (page $pageNum)" }
+    Write-Verbose ("Calling: {0}" -f $next)
+    $page = Invoke-AzRestJson -Url $next -Activity $act
     if ($null -eq $page) { break }
     if ($page.value) { $page.value } elseif ($page.items) { $page.items }  # some endpoints return items
     if ($page.nextLink) { $next = $page.nextLink } else { break }
   }
 }
+
 
 # ---- Pre-checks ------------------------------------------------------------
 
@@ -90,27 +156,18 @@ Ensure-Folder $metaFolder
 # ---- 1) APIs: list, export OpenAPI, export policy per API ------------------
 
 Write-Host ">> Listing APIs..."
+Write-Verbose ("ARM URL: {0}" -f $apisUrl)
 $apisUrl = "$base/apis?api-version=$ApiVersion"
-$apis = @( Get-Paged -Url $apisUrl )
+$apis = @( Get-Paged -Url $apisUrl -Activity "Listing APIs" )
 Write-Host ">> Found $($apis.Count) API(s)."
 
-
-$__exportStart = Get-Date
-$i = 0
-$total = $apis.Count
 foreach ($api in $apis) {
-  $i++
-  $currentName = $api.name
-  Write-Verbose ("[API {0}/{1}] {2}" -f $i, $total, $currentName)
-  $pct = if ($total -gt 0) { [int](100 * $i / $total) } else { 0 }
-  Write-Progress -Activity "Exporting APIs" -Status ("{0}/{1}: {2}" -f $i, $total, $currentName) -PercentComplete $pct
-$apiId = $api.name
+  $apiId = $api.name
   $apiNameSafe = Safe-Name $apiId
   $apiFolder = Join-Path $apisFolder $apiNameSafe
   Ensure-Folder $apiFolder
 
   Write-Host "  - Exporting API '$apiId'..."
-  $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
   # 1.a OpenAPI via `az apim api export` (reliable across tenants)
   # Formats: OpenApiJson | OpenApi | Wadl | Wsdl | etc.
@@ -171,7 +228,7 @@ $apiId = $api.name
 Write-Host ">> Exporting products..."
 try {
   $prodUrl = "$base/products?api-version=$ApiVersion"
-  $products = @( Get-Paged -Url $prodUrl )
+  $products = @( Get-Paged -Url $prodUrl -Activity "Listing products" )
   ($products | ConvertTo-Json -Depth 100) | Out-File -FilePath (Join-Path $metaFolder "products.json") -Encoding UTF8
 } catch { Write-Warning "  ! Products export failed (continuing)." }
 
@@ -180,7 +237,7 @@ try {
 Write-Host ">> Exporting named values (reference only; secret values are not revealed)..."
 try {
   $nvUrl = "$base/namedValues?api-version=$ApiVersion"
-  $named = @( Get-Paged -Url $nvUrl )
+  $named = @( Get-Paged -Url $nvUrl -Activity "Listing named values" )
   ($named | ConvertTo-Json -Depth 100) | Out-File -FilePath (Join-Path $metaFolder "named-values.json") -Encoding UTF8
 } catch { Write-Warning "  ! Named values export failed (continuing)." }
 
@@ -189,7 +246,7 @@ try {
 Write-Host ">> Exporting backends..."
 try {
   $beUrl = "$base/backends?api-version=$ApiVersion"
-  $backends = @( Get-Paged -Url $beUrl )
+  $backends = @( Get-Paged -Url $beUrl -Activity "Listing backends" )
   ($backends | ConvertTo-Json -Depth 100) | Out-File -FilePath (Join-Path $metaFolder "backends.json") -Encoding UTF8
 } catch { Write-Warning "  ! Backends export failed (continuing)." }
 
@@ -198,7 +255,7 @@ try {
 Write-Host ">> Exporting loggers..."
 try {
   $lgUrl = "$base/loggers?api-version=$ApiVersion"
-  $loggers = @( Get-Paged -Url $lgUrl )
+  $loggers = @( Get-Paged -Url $lgUrl -Activity "Listing loggers" )
   ($loggers | ConvertTo-Json -Depth 100) | Out-File -FilePath (Join-Path $metaFolder "loggers.json") -Encoding UTF8
 } catch { Write-Warning "  ! Loggers export failed (continuing)." }
 
@@ -207,7 +264,7 @@ try {
 Write-Host ">> Exporting diagnostics..."
 try {
   $dgUrl = "$base/diagnostics?api-version=$ApiVersion"
-  $diags = @( Get-Paged -Url $dgUrl )
+  $diags = @( Get-Paged -Url $dgUrl -Activity "Listing diagnostics" )
   ($diags | ConvertTo-Json -Depth 100) | Out-File -FilePath (Join-Path $metaFolder "diagnostics.json") -Encoding UTF8
 } catch { Write-Warning "  ! Diagnostics export failed (continuing)." }
 
@@ -216,7 +273,7 @@ try {
 Write-Host ">> Exporting authorization servers..."
 try {
   $authUrl = "$base/authorizationServers?api-version=$ApiVersion"
-  $authz = @( Get-Paged -Url $authUrl )
+  $authz = @( Get-Paged -Url $authUrl -Activity "Listing authorization servers" )
   ($authz | ConvertTo-Json -Depth 100) | Out-File -FilePath (Join-Path $metaFolder "authorization-servers.json") -Encoding UTF8
 } catch { Write-Warning "  ! Authorization servers export failed (continuing)." }
 
@@ -225,7 +282,7 @@ try {
 Write-Host ">> Exporting tags..."
 try {
   $tagUrl = "$base/tags?api-version=$ApiVersion"
-  $tags = @( Get-Paged -Url $tagUrl )
+  $tags = @( Get-Paged -Url $tagUrl -Activity "Listing tags" )
   ($tags | ConvertTo-Json -Depth 100) | Out-File -FilePath (Join-Path $metaFolder "tags.json") -Encoding UTF8
 } catch { Write-Warning "  ! Tags export failed (continuing)." }
 
@@ -252,6 +309,7 @@ if (Test-Path $mapFile) {
     }
   }
 }
-  $totalElapsed = (Get-Date) - $__exportStart
-Write-Verbose ("Total elapsed: {0:g}" -f $totalElapsed)
+
+
+
 Write-Host ">> Done. Output under: $OutFolder"
