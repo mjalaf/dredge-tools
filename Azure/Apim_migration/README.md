@@ -10,9 +10,61 @@ environments.
 
 ## 📦 Scripts
 
-### 1. apim-export.ps1
+### 1. apim-export-simplified.ps1 ⭐ **RECOMMENDED**
 
-Exports APIM configuration and artifacts into a local folder.
+**NEW**: Simplified script for exporting essential APIM resources with clean, maintainable code.
+
+**Exports:** 
+- APIs (metadata, policies, operations, schemas)
+- Products (with policies)
+- Named Values
+- Subscriptions
+- Backends
+- Global policies
+
+**Features:**
+- Support for specific APIs or all APIs
+- PowerShell 5.1+ compatible
+- Simple parameter structure
+- Organized file output
+- Verbose logging
+
+**Usage:**
+
+``` powershell
+# Export all APIs
+.\apim-export-simplified.ps1 `
+  -SubscriptionId "<SUBSCRIPTION_ID>" `
+  -ResourceGroup "<APIM_RESOURCE_GROUP>" `
+  -ApimName "<APIM_NAME>" `
+  -OutFolder ".\export" `
+  -Verbose
+
+# Export specific APIs
+.\apim-export-simplified.ps1 `
+  -SubscriptionId "<SUBSCRIPTION_ID>" `
+  -ResourceGroup "<APIM_RESOURCE_GROUP>" `
+  -ApimName "<APIM_NAME>" `
+  -OutFolder ".\export" `
+  -ApiNames @("api1", "api2") `
+  -Verbose
+```
+
+See `README-Simplified.md` for detailed documentation.
+
+------------------------------------------------------------------------
+
+### 2. apim-export-individual-list.ps1 (Advanced)
+
+Full-featured export script with advanced capabilities including concurrency, retry logic, and comprehensive resource coverage.
+
+**Note**: This is the original complex script. Use `apim-export-simplified.ps1` for most scenarios.
+
+------------------------------------------------------------------------
+
+### 3. apim-export.ps1 (Legacy)
+
+Original basic export script.
 
 **Exports:** - APIs (OpenAPI specs + policy XML + metadata JSON) -
 Products - Named Values (metadata only, secret values are not

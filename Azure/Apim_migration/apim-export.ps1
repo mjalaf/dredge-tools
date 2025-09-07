@@ -137,7 +137,6 @@ function Get-Paged {
   }
 }
 
-
 # ---- Pre-checks ------------------------------------------------------------
 
 Write-Host ">> Using subscription: $SubscriptionId"
