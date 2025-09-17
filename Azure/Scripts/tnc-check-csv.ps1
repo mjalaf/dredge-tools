@@ -1,7 +1,7 @@
 <# 
-  tnc-check-csv.ps1  (compatible con Windows PowerShell 5.1)
+  tnc-check-csv.ps1  (Windows PowerShell 5.1 compatible)
   CSV columns: Host,Port[,Name,Type]
-  Uso:
+  Usage:
     .\tnc-check-csv.ps1 -CsvPath .\targets.csv
     .\tnc-check-csv.ps1 -CsvPath .\targets.csv -OutCsv .\results.csv
     .\tnc-check-csv.ps1 -CsvPath .\targets.csv -UseTnc
@@ -16,7 +16,7 @@ param(
 
   [int]$TimeoutMs = 3000,
 
-  [switch]$UseTnc   # usa Test-NetConnection; si no, TcpClient (más rápido)
+  [switch]$UseTnc   # Uses Test-NetConnection; else TcpClient (faster)
 )
 
 if (-not (Test-Path $CsvPath)) {
@@ -47,12 +47,13 @@ function Map-Row {
 
   if (-not $host -or -not $port -or -not ($port -as [int])) { return $null }
   if (-not $name) { $name = $host }
+  $typeOut = if ($type) { "$type" } else { $null }
 
   return [pscustomobject]@{
     Host = "$host"
     Port = [int]$port
     Name = "$name"
-    Type = $(if ($type) { "$type" } else { $null })
+    Type = $typeOut
   }
 }
 
@@ -86,7 +87,18 @@ function Test-TcpPortTnc {
     if ($null -ne $r -and $r.PSObject.Properties.Name -contains 'TcpTestSucceeded') {
       $ok = [bool]$r.TcpTestSucceeded
     }
-    return [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result=($ok -eq $true ? 'PASS' : 'FAIL'); LatencyMs=$null; Error=($ok -eq $true ? $null : 'No TCP handshake') }
+    $result = if ($ok) { 'PASS' } else { 'FAIL' }
+    $errMsg = if ($ok) { $null } else { 'No TCP handshake' }
+
+    return [pscustomobject]@{
+      Type      = $Type
+      Name      = $Name
+      Host      = $Host
+      Port      = $Port
+      Result    = $result
+      LatencyMs = $null
+      Error     = $errMsg
+    }
   } catch {
     return [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result='FAIL'; LatencyMs=$null; Error=$_.Exception.Message }
   }
