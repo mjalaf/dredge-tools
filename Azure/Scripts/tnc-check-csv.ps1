@@ -1,10 +1,7 @@
 <# 
-  tnc-check-csv.ps1
-  CSV-only TCP check with PASS/FAIL.
-  Columns (required): Host,Port
-  Optional columns:   Name,Type   (e.g., APIM, KeyVault, SQL)
-
-  Examples:
+  tnc-check-csv.ps1  (compatible con Windows PowerShell 5.1)
+  CSV columns: Host,Port[,Name,Type]
+  Uso:
     .\tnc-check-csv.ps1 -CsvPath .\targets.csv
     .\tnc-check-csv.ps1 -CsvPath .\targets.csv -OutCsv .\results.csv
     .\tnc-check-csv.ps1 -CsvPath .\targets.csv -UseTnc
@@ -19,8 +16,7 @@ param(
 
   [int]$TimeoutMs = 3000,
 
-  # Use Windows Test-NetConnection (slower, native TNC) instead of TcpClient
-  [switch]$UseTnc
+  [switch]$UseTnc   # usa Test-NetConnection; si no, TcpClient (más rápido)
 )
 
 if (-not (Test-Path $CsvPath)) {
@@ -28,18 +24,35 @@ if (-not (Test-Path $CsvPath)) {
   exit 1
 }
 
+function Get-FirstNonEmpty {
+  param(
+    [Parameter(Mandatory=$true)][object]$Obj,
+    [Parameter(Mandatory=$true)][string[]]$Names
+  )
+  foreach ($n in $Names) {
+    if ($Obj.PSObject.Properties.Match($n).Count -gt 0) {
+      $v = $Obj.$n
+      if ($null -ne $v -and "$v".Trim() -ne '') { return "$v" }
+    }
+  }
+  return $null
+}
+
 function Map-Row {
   param($r)
-  $host = $r.Host ?? $r.IP ?? $r.Address ?? $r.Target
-  $port = $r.Port
-  $name = $r.Name ?? $r.ResourceName ?? $r.Alias
-  $type = $r.Type ?? $r.ResourceType ?? $r.Kind
+  $host = Get-FirstNonEmpty -Obj $r -Names @('Host','IP','Address','Target')
+  $port = Get-FirstNonEmpty -Obj $r -Names @('Port')
+  $name = Get-FirstNonEmpty -Obj $r -Names @('Name','ResourceName','Alias')
+  $type = Get-FirstNonEmpty -Obj $r -Names @('Type','ResourceType','Kind')
+
   if (-not $host -or -not $port -or -not ($port -as [int])) { return $null }
-  [pscustomobject]@{
+  if (-not $name) { $name = $host }
+
+  return [pscustomobject]@{
     Host = "$host"
     Port = [int]$port
-    Name = ($name ? "$name" : "$host")
-    Type = ($type ? "$type" : $null)
+    Name = "$name"
+    Type = $(if ($type) { "$type" } else { $null })
   }
 }
 
@@ -55,10 +68,10 @@ function Test-TcpPortDotNet {
     }
     $client.EndConnect($iar) | Out-Null
     $sw.Stop()
-    [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result='PASS'; LatencyMs=[int]$sw.ElapsedMilliseconds; Error=$null }
+    return [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result='PASS'; LatencyMs=[int]$sw.ElapsedMilliseconds; Error=$null }
   } catch {
     $sw.Stop()
-    [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result='FAIL'; LatencyMs=$null; Error=$_.Exception.Message }
+    return [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result='FAIL'; LatencyMs=$null; Error=$_.Exception.Message }
   } finally {
     if ($client.Connected) { $client.Close() }
     if ($iar) { $iar.AsyncWaitHandle.Close() }
@@ -69,10 +82,13 @@ function Test-TcpPortTnc {
   param([string]$Host, [int]$Port, [int]$TimeoutMs, [string]$Name, [string]$Type)
   try {
     $r = Test-NetConnection -ComputerName $Host -Port $Port -WarningAction SilentlyContinue
-    $ok = ($null -ne $r -and $r.PSObject.Properties.Name -contains 'TcpTestSucceeded' -and $r.TcpTestSucceeded)
-    [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result=($ok?'PASS':'FAIL'); LatencyMs=$null; Error=($ok?$null:'No TCP handshake') }
+    $ok = $false
+    if ($null -ne $r -and $r.PSObject.Properties.Name -contains 'TcpTestSucceeded') {
+      $ok = [bool]$r.TcpTestSucceeded
+    }
+    return [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result=($ok -eq $true ? 'PASS' : 'FAIL'); LatencyMs=$null; Error=($ok -eq $true ? $null : 'No TCP handshake') }
   } catch {
-    [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result='FAIL'; LatencyMs=$null; Error=$_.Exception.Message }
+    return [pscustomobject]@{ Type=$Type; Name=$Name; Host=$Host; Port=$Port; Result='FAIL'; LatencyMs=$null; Error=$_.Exception.Message }
   }
 }
 
@@ -94,7 +110,7 @@ $results = foreach ($t in $targets) {
 }
 
 $results |
-  Sort-Object @{e='Result'; d={$args[0] -eq 'FAIL' ? 0 : 1}}, Type, Name, Host, Port |
+  Sort-Object @{Expression={ if ($_.Result -eq 'FAIL') {0} else {1} }}, Type, Name, Host, Port |
   Format-Table Type, Name, Host, Port, Result, LatencyMs, Error -AutoSize
 
 if ($OutCsv) {
